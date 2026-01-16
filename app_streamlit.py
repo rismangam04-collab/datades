@@ -759,8 +759,7 @@ elif is_data_exists():
                 data_db,
                 num_rows="dynamic",
                 use_container_width=True,
-                height=500,
-                disabled=["nik"]  # NIK tidak bisa diedit
+                height=500
             )
             
             # Validasi NIK sebelum simpan
