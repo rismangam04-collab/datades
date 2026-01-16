@@ -730,7 +730,6 @@ elif is_data_exists():
                  "🆔 Identitas", "📊 Dashboard"]
     
     if st.session_state.is_admin:
-        tab_names.append("📥 Upload Excel")
         tab_names.append("🔧 Admin Tools")
     
     tabs = st.tabs(tab_names)
@@ -1040,64 +1039,6 @@ elif is_data_exists():
             st.metric("Perempuan", stats['perempuan'])
         with col4:
             st.metric("Rasio L/P", f"{stats['laki_laki']/stats['total']*100:.1f}%" if stats['total'] > 0 else "0%")
-        # ================= TAB UPLOAD EXCEL (BULK INSERT) =================
-if st.session_state.is_admin:
-    with tabs[-2]:  # posisi sebelum Admin Tools
-        st.subheader("📥 Upload Data Penduduk (Excel)")
-
-        st.info("""
-        ✔ Upload untuk **menambah / memperbarui data sekaligus**
-        ✔ Data lama tidak akan terhapus
-        ✔ Berdasarkan **NIK (UPSERT)**
-        """)
-
-        uploaded_file = st.file_uploader(
-            "Upload File Excel (.xlsx)",
-            type=["xlsx"]
-        )
-
-        if uploaded_file:
-            try:
-                df_upload = pd.read_excel(uploaded_file)
-
-                st.subheader("🔍 Preview Data")
-                st.dataframe(df_upload.head(20), use_container_width=True)
-
-                # ===== Validasi kolom wajib =====
-                wajib = ["nik", "nama", "jenis_kelamin"]
-                missing = [c for c in wajib if c not in df_upload.columns]
-
-                if missing:
-                    st.error(f"❌ Kolom wajib tidak ada: {missing}")
-                    st.stop()
-
-                # ===== Normalisasi kolom =====
-                df_upload = normalize_columns(df_upload)
-
-                # ===== Bersihkan baris kosong =====
-                df_upload = df_upload[
-                    df_upload["nik"].notna() &
-                    (df_upload["nik"].astype(str).str.strip() != "")
-                ]
-
-                # ===== Validasi NIK =====
-                invalid_nik = df_upload[~df_upload["nik"].apply(validate_nik)]
-
-                if not invalid_nik.empty:
-                    st.error(f"⚠️ Ditemukan {len(invalid_nik)} NIK tidak valid")
-                    st.dataframe(invalid_nik[["nik", "nama"]])
-                    st.stop()
-
-                st.success("✅ Data valid & siap disimpan")
-
-                if st.button("💾 Simpan Data Massal", type="primary"):
-                    save_to_db(df_upload)
-                    st.success("🎉 Data Excel berhasil ditambahkan / diperbarui")
-                    st.rerun()
-
-            except Exception as e:
-                st.error(f"❌ Gagal membaca file: {e}")
-
         # Kelompok umur
         st.subheader("📈 Distribusi Kelompok Umur")
         age_data = pd.DataFrame({
