@@ -685,8 +685,7 @@ if not st.session_state.logged_in:
     # Tampilkan preview data saja jika ada
     if is_data_exists():
         data_db = normalize_columns(load_data())
-        st.subheader("📋 Preview Data (Read Only)")
-        st.dataframe(data_db.head(10), use_container_width=True)
+        
     else:
         st.info("Database masih kosong. Login sebagai admin untuk upload data pertama kali.")
     
