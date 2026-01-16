@@ -761,7 +761,13 @@ elif is_data_exists():
                 use_container_width=True,
                 height=500
             )
-            
+            # Hapus baris kosong / NIK tidak diisi
+            edited_df = edited_df[
+                edited_df["nik"].notna() &
+                (edited_df["nik"].str.strip() != "") &
+                (edited_df["nik"] != "-")
+            ]
+
             # Validasi NIK sebelum simpan
             invalid_nik = edited_df[~edited_df['nik'].apply(validate_nik)]
             
