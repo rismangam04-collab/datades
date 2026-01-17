@@ -1,6 +1,7 @@
 # ==========================
 # SISTEM DATA PENDUDUK STREAMLIT SUPER LENGKAP (FIX) - VERSION AMAN
 # DENGAN ENKRIPSI, LOGIN ADMIN, STATISTIK, DAN FITUR PENCARIAN
+# + FITUR UPLOAD DATA MASAL
 # ==========================
 
 import streamlit as st
@@ -12,6 +13,7 @@ import time
 import secrets
 import hashlib
 from datetime import datetime, timedelta
+import io
 
 
 # ================= KONFIGURASI KEAMANAN =================
@@ -446,9 +448,165 @@ def get_statistics(df: pd.DataFrame) -> dict:
     
     return stats
 
+# ================= FUNGSI UPLOAD DATA MASAL =================
+def process_uploaded_file(uploaded_file, merge_option: str = "append") -> tuple:
+    """
+    Proses file Excel yang diupload
+    Returns: (success, message, df, invalid_rows)
+    """
+    try:
+        # Baca file Excel
+        if uploaded_file.name.endswith('.xlsx') or uploaded_file.name.endswith('.xls'):
+            df = pd.read_excel(uploaded_file)
+        elif uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file, encoding='utf-8')
+        else:
+            return False, "Format file tidak didukung. Gunakan Excel (.xlsx, .xls) atau CSV.", None, None
+        
+        # Validasi kolom minimal
+        required_columns = ['nik', 'nama']
+        missing_cols = [col for col in required_columns if col not in df.columns]
+        
+        if missing_cols:
+            return False, f"Kolom wajib tidak ditemukan: {', '.join(missing_cols)}", None, None
+        
+        # Normalisasi nama kolom (ubah ke lowercase)
+        df.columns = [col.lower().strip() for col in df.columns]
+        
+        # Normalisasi kolom
+        df = normalize_columns(df)
+        
+        # Validasi NIK
+        df['nik'] = df['nik'].astype(str).str.strip()
+        invalid_nik_mask = ~df['nik'].apply(validate_nik)
+        
+        if invalid_nik_mask.any():
+            invalid_rows = df[invalid_nik_mask].copy()
+            invalid_rows['alasan'] = 'NIK tidak valid (harus 16 digit angka)'
+        else:
+            invalid_rows = pd.DataFrame()
+        
+        # Validasi data lainnya
+        validation_errors = []
+        
+        # Validasi jenis kelamin
+        if 'jenis_kelamin' in df.columns:
+            valid_genders = ['Laki-laki', 'Perempuan', 'L', 'P']
+            invalid_gender = ~df['jenis_kelamin'].isin(valid_genders)
+            if invalid_gender.any():
+                for idx in df[invalid_gender].index:
+                    validation_errors.append({
+                        'row': idx + 2,  # +2 karena header + index mulai dari 0
+                        'nik': df.loc[idx, 'nik'],
+                        'field': 'jenis_kelamin',
+                        'value': df.loc[idx, 'jenis_kelamin'],
+                        'alasan': 'Harus "Laki-laki" atau "Perempuan"'
+                    })
+        
+        # Validasi umur
+        if 'umur' in df.columns:
+            try:
+                df['umur'] = pd.to_numeric(df['umur'], errors='coerce')
+                invalid_age = (df['umur'] < 0) | (df['umur'] > 150)
+                if invalid_age.any():
+                    for idx in df[invalid_age].index:
+                        validation_errors.append({
+                            'row': idx + 2,
+                            'nik': df.loc[idx, 'nik'],
+                            'field': 'umur',
+                            'value': df.loc[idx, 'umur'],
+                            'alasan': 'Umur harus antara 0-150 tahun'
+                        })
+            except:
+                pass
+        
+        # Tambahkan validation errors ke invalid_rows
+        if validation_errors:
+            error_df = pd.DataFrame(validation_errors)
+            invalid_rows = pd.concat([invalid_rows, error_df], ignore_index=True)
+        
+        # Validasi duplikat NIK dalam file
+        duplicate_nik = df[df.duplicated('nik', keep=False)]
+        if not duplicate_nik.empty:
+            for idx in duplicate_nik.index:
+                invalid_rows = pd.concat([invalid_rows, pd.DataFrame([{
+                    'row': idx + 2,
+                    'nik': df.loc[idx, 'nik'],
+                    'field': 'nik',
+                    'value': df.loc[idx, 'nik'],
+                    'alasan': 'NIK duplikat dalam file'
+                }])], ignore_index=True)
+        
+        return True, "File berhasil diproses", df, invalid_rows
+        
+    except Exception as e:
+        return False, f"Error memproses file: {str(e)}", None, None
+
+def upload_data_massal(df_new: pd.DataFrame, merge_option: str = "append", replace_duplicates: bool = True):
+    """
+    Upload data massal ke database
+    """
+    try:
+        conn = get_connection()
+        
+        if merge_option == "append":
+            # Load data yang sudah ada
+            existing_df = load_data()
+            existing_niks = set(existing_df['nik'].astype(str))
+            
+            # Filter data baru yang NIK-nya belum ada
+            new_niks = set(df_new['nik'].astype(str))
+            duplicate_niks = new_niks.intersection(existing_niks)
+            
+            if duplicate_niks and not replace_duplicates:
+                # Hanya tambah yang belum ada
+                df_to_add = df_new[~df_new['nik'].isin(duplicate_niks)]
+                duplicate_count = len(df_new) - len(df_to_add)
+                message = f"Data ditambahkan: {len(df_to_add)} baris. {duplicate_count} data duplikat diabaikan."
+            else:
+                # Replace yang duplikat
+                df_to_add = df_new
+                duplicate_count = len(duplicate_niks)
+                message = f"Data ditambahkan/diperbarui: {len(df_to_add)} baris. {duplicate_count} data diperbarui."
+            
+            # Simpan ke database
+            if not df_to_add.empty:
+                save_to_db(df_to_add)
+            
+            return True, message, duplicate_count
+            
+        elif merge_option == "replace_all":
+            # Hapus semua data lama
+            conn.execute("DELETE FROM penduduk")
+            conn.commit()
+            
+            # Tambah data baru
+            save_to_db(df_new)
+            
+            return True, f"Semua data diganti dengan {len(df_new)} baris data baru.", len(df_new)
+            
+        elif merge_option == "update_only":
+            # Update hanya data yang sudah ada
+            existing_df = load_data()
+            existing_niks = set(existing_df['nik'].astype(str))
+            
+            df_to_update = df_new[df_new['nik'].isin(existing_niks)]
+            
+            if not df_to_update.empty:
+                save_to_db(df_to_update)
+                return True, f"{len(df_to_update)} data diperbarui.", len(df_to_update)
+            else:
+                return False, "Tidak ada data yang bisa diperbarui (NIK tidak ditemukan).", 0
+                
+    except Exception as e:
+        return False, f"Error upload data: {str(e)}", 0
+    finally:
+        conn.close()
+
 # ================= INISIALISASI DATABASE =================
 create_table()
 create_users_table()
+
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Pastikan semua kolom bansos & identitas selalu ada"""
     default_cols = {
@@ -462,12 +620,36 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "lpg_3kg": "Tidak",
         "punya_ktp": "Tidak",
         "punya_kk": "Tidak",
-        "no_kk": ""
+        "no_kk": "",
+        "jenis_kelamin": "Laki-laki",
+        "status_keluarga": "Anggota",
+        "pendidikan": "Tidak Sekolah",
+        "pekerjaan": "Tidak Bekerja",
+        "dusun": "",
+        "alamat": "",
+        "umur": 0
     }
 
     for col, default in default_cols.items():
         if col not in df.columns:
             df[col] = default
+        else:
+            # Clean data
+            if col in ['pkh', 'kks', 'pbi_jkn', 'blt', 'koperasi_merah_putih', 
+                      'pip', 'subsidi_listrik', 'lpg_3kg', 'punya_ktp', 'punya_kk']:
+                df[col] = df[col].astype(str).str.strip()
+                # Normalize "Ya"/"Tidak"
+                mask_ya = df[col].str.contains('ya|Ya|YA|y|Y|yes|Yes|YES', na=False)
+                mask_tidak = df[col].str.contains('tidak|Tidak|TIDAK|no|No|NO|t|T', na=False)
+                df.loc[mask_ya, col] = 'Ya'
+                df.loc[mask_tidak, col] = 'Tidak'
+                
+            elif col == 'jenis_kelamin':
+                df[col] = df[col].astype(str).str.strip()
+                mask_l = df[col].str.contains('laki|laki-laki|Laki|Laki-laki|LAKI|LAKI-LAKI|L|l', na=False)
+                mask_p = df[col].str.contains('perempuan|Perempuan|PEREMPUAN|P|p|wanita|Wanita|WANITA', na=False)
+                df.loc[mask_l, col] = 'Laki-laki'
+                df.loc[mask_p, col] = 'Perempuan'
 
     return df
 
@@ -695,28 +877,32 @@ if not st.session_state.logged_in:
 if not is_data_exists() and st.session_state.can_edit:
     st.warning("Database masih kosong. Silakan upload file Excel pertama kali.")
     
-    uploaded_file = st.file_uploader("📥 Upload File Excel", type=["xlsx", "xls"])
+    uploaded_file = st.file_uploader("📥 Upload File Excel", type=["xlsx", "xls", "csv"])
     
     if uploaded_file:
         try:
-            df = pd.read_excel(uploaded_file)
+            # Proses file
+            success, message, df, invalid_rows = process_uploaded_file(uploaded_file)
             
-            # Validasi kolom NIK
-            if 'nik' in df.columns:
-                invalid_nik = df[~df['nik'].apply(validate_nik)]
-                if not invalid_nik.empty:
-                    st.warning(f"⚠️ Ditemukan {len(invalid_nik)} NIK tidak valid:")
-                    st.dataframe(invalid_nik[['nik', 'nama']])
-            
-            st.dataframe(df.head(20))
-            
-            if st.button("💾 Simpan ke Database", key="save_first", type="primary"):
-                # Simpan data lama untuk logging
-                st.session_state.old_data = pd.DataFrame()
+            if success:
+                st.success(f"✅ {message}")
+                st.write(f"**Total data dalam file:** {len(df)} baris")
                 
-                save_to_db(df)
-                st.success("Data berhasil disimpan ✔️")
-                st.rerun()
+                if not invalid_rows.empty:
+                    st.warning(f"⚠️ Ditemukan {len(invalid_rows)} baris dengan masalah:")
+                    st.dataframe(invalid_rows)
+                
+                # Preview data
+                with st.expander("👁️ Preview Data (20 baris pertama)"):
+                    st.dataframe(df.head(20))
+                
+                if st.button("💾 Simpan ke Database", key="save_first", type="primary"):
+                    # Simpan data
+                    save_to_db(df)
+                    st.success("Data berhasil disimpan ✔️")
+                    st.rerun()
+            else:
+                st.error(f"❌ {message}")
         except Exception as e:
             st.error(f"Error membaca file: {str(e)}")
 
@@ -725,7 +911,8 @@ elif is_data_exists():
     data_db = normalize_columns(load_data())
     
     # ================= TAB UTAMA =================
-    tab_names = ["📋 Data Utama", "👪 Kartu Keluarga", "🎓 Pendidikan", 
+    # Tambahkan tab Upload Data Massal
+    tab_names = ["📋 Data Utama", "📤 Upload Data", "👪 Kartu Keluarga", "🎓 Pendidikan", 
                  "💼 Pekerjaan", "🏡 Dusun", "🧧 Bantuan Sosial",
                  "🆔 Identitas", "📊 Dashboard"]
     
@@ -796,7 +983,165 @@ elif is_data_exists():
             st.info("👀 **Mode View Only** - Login sebagai admin untuk edit data")
             st.dataframe(data_db, use_container_width=True, height=500)
     
-    with tabs[1]:  # Kartu Keluarga
+    # ================= TAB UPLOAD DATA MASAL =================
+    with tabs[1]:
+        st.subheader("📤 Upload Data Massal")
+        st.info("Upload file Excel/CSV untuk menambah atau memperbarui data penduduk dalam jumlah besar.")
+        
+        # Pilihan metode upload
+        col1, col2 = st.columns(2)
+        with col1:
+            merge_option = st.radio(
+                "Pilih metode upload:",
+                ["append", "update_only", "replace_all"],
+                format_func=lambda x: {
+                    "append": "Tambah Data Baru (abaikan duplikat)",
+                    "update_only": "Perbarui Data yang Sudah Ada",
+                    "replace_all": "Ganti Semua Data"
+                }[x]
+            )
+        
+        with col2:
+            replace_duplicates = st.checkbox(
+                "Timpa data duplikat",
+                value=True,
+                help="Jika dicentang, data baru akan menggantikan data lama dengan NIK yang sama"
+            )
+        
+        # Upload file
+        uploaded_file = st.file_uploader(
+            "Pilih file Excel/CSV",
+            type=["xlsx", "xls", "csv"],
+            key="mass_upload"
+        )
+        
+        if uploaded_file:
+            # Proses file
+            with st.spinner("Memproses file..."):
+                success, message, df, invalid_rows = process_uploaded_file(uploaded_file)
+            
+            if success:
+                st.success(f"✅ {message}")
+                
+                # Tampilkan statistik
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Data", len(df))
+                with col2:
+                    existing_data = load_data()
+                    existing_niks = set(existing_data['nik'].astype(str))
+                    new_niks = set(df['nik'].astype(str))
+                    duplicate_count = len(new_niks.intersection(existing_niks))
+                    st.metric("Data Duplikat", duplicate_count)
+                with col3:
+                    st.metric("Data Baru", len(df) - duplicate_count)
+                
+                # Tampilkan data invalid jika ada
+                if not invalid_rows.empty:
+                    st.warning(f"⚠️ Ditemukan {len(invalid_rows)} baris dengan masalah:")
+                    with st.expander("Lihat Data Bermasalah"):
+                        st.dataframe(invalid_rows)
+                    
+                    # Opsi untuk tetap upload atau tidak
+                    continue_upload = st.checkbox("Tetap upload data yang valid", value=True)
+                else:
+                    continue_upload = True
+                    st.success("✅ Semua data valid!")
+                
+                # Preview data
+                with st.expander("👁️ Preview Data (10 baris pertama)"):
+                    st.dataframe(df.head(10))
+                
+                # Template download
+                with st.expander("📥 Download Template"):
+                    st.info("Download template Excel untuk memastikan format data sesuai")
+                    
+                    # Buat template dataframe
+                    template_data = {
+                        'nik': ['1234567890123456', '2345678901234567'],
+                        'nama': ['Contoh Nama 1', 'Contoh Nama 2'],
+                        'jenis_kelamin': ['Laki-laki', 'Perempuan'],
+                        'alamat': ['Jl. Contoh No. 1', 'Jl. Contoh No. 2'],
+                        'umur': [30, 25],
+                        'no_kk': ['1234567890', '2345678901'],
+                        'status_keluarga': ['Kepala', 'Anggota'],
+                        'pendidikan': ['SMA', 'S1'],
+                        'pekerjaan': ['PNS', 'Wiraswasta'],
+                        'pkh': ['Ya', 'Tidak'],
+                        'kks': ['Tidak', 'Ya'],
+                        'pbi_jkn': ['Ya', 'Tidak'],
+                        'blt': ['Tidak', 'Ya'],
+                        'koperasi_merah_putih': ['Ya', 'Tidak'],
+                        'pip': ['Tidak', 'Ya'],
+                        'subsidi_listrik': ['Ya', 'Tidak'],
+                        'lpg_3kg': ['Tidak', 'Ya'],
+                        'punya_ktp': ['Ya', 'Dalam Proses'],
+                        'punya_kk': ['Ya', 'Tidak'],
+                        'dusun': ['Dusun 1', 'Dusun 2']
+                    }
+                    
+                    template_df = pd.DataFrame(template_data)
+                    
+                    # Convert to Excel
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        template_df.to_excel(writer, index=False, sheet_name='Template')
+                    
+                    output.seek(0)
+                    
+                    st.download_button(
+                        label="📥 Download Template Excel",
+                        data=output,
+                        file_name="template_data_penduduk.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                # Tombol upload
+                if continue_upload and st.button("🚀 Upload Data ke Database", type="primary"):
+                    with st.spinner("Mengupload data..."):
+                        upload_success, upload_message, count = upload_data_massal(
+                            df, 
+                            merge_option, 
+                            replace_duplicates
+                        )
+                    
+                    if upload_success:
+                        st.success(f"✅ {upload_message}")
+                        
+                        # Log perubahan
+                        if 'username' in st.session_state:
+                            log_data_change(
+                                "penduduk", 
+                                "mass_upload", 
+                                "mass_upload", 
+                                {"count_before": len(existing_data)}, 
+                                {"count_after": len(load_data())}, 
+                                st.session_state.username
+                            )
+                        
+                        # Tampilkan statistik setelah upload
+                        new_data = load_data()
+                        new_stats = get_statistics(new_data)
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total Data Sekarang", new_stats['total'], 
+                                     delta=new_stats['total'] - stats['total'])
+                        with col2:
+                            st.metric("Laki-laki", new_stats['laki_laki'])
+                        with col3:
+                            st.metric("Perempuan", new_stats['perempuan'])
+                        
+                        # Tombol untuk melihat data
+                        if st.button("🔄 Refresh dan Lihat Data"):
+                            st.rerun()
+                    else:
+                        st.error(f"❌ {upload_message}")
+            else:
+                st.error(f"❌ {message}")
+    
+    # Tab lainnya tetap sama...
+    with tabs[2]:  # Kartu Keluarga
         st.subheader("👪 Sistem Kartu Keluarga (KK)")
         
         # Statistik KK
@@ -848,7 +1193,7 @@ elif is_data_exists():
                 st.success(f"📌 KK: {pilih_kk} | Kepala: **{nama}**")
                 st.dataframe(data_kk, use_container_width=True)
     
-    with tabs[2]:  # Pendidikan
+    with tabs[3]:  # Pendidikan
         st.subheader("🎓 Pendidikan")
         
         if 'pendidikan' in data_db.columns:
@@ -876,7 +1221,7 @@ elif is_data_exists():
             
             st.dataframe(data_pendidikan, use_container_width=True)
     
-    with tabs[3]:  # Pekerjaan
+    with tabs[4]:  # Pekerjaan
         st.subheader("💼 Pekerjaan")
         
         if 'pekerjaan' in data_db.columns:
@@ -904,7 +1249,7 @@ elif is_data_exists():
             
             st.dataframe(data_pekerjaan, use_container_width=True)
     
-    with tabs[4]:  # Dusun
+    with tabs[5]:  # Dusun
         st.subheader("🏡 Dusun")
         
         # Ekstrak dusun dari alamat
@@ -935,7 +1280,7 @@ elif is_data_exists():
         
         st.dataframe(data_dusun, use_container_width=True)
     
-    with tabs[5]:  
+    with tabs[6]:  
         # Bantuan Sosial
         st.subheader("🧧 Data Penerima Bansos")
         
@@ -975,7 +1320,7 @@ elif is_data_exists():
         else:
             st.warning(f"Kolom {col_bansos} tidak ditemukan dalam data")
     
-    with tabs[6]:  # Identitas
+    with tabs[7]:  # Identitas
         st.subheader("🆔 Identitas Penduduk")
         
         col1, col2 = st.columns(2)
@@ -1024,7 +1369,7 @@ elif is_data_exists():
             ]) if all(col in data_db.columns for col in ['punya_ktp', 'punya_kk']) else 0
             st.metric("Identitas Lengkap", complete_id)
     
-    with tabs[7]:  # Dashboard
+    with tabs[8]:  # Dashboard
         st.subheader("📊 Dashboard Statistik")
         
         stats = get_statistics(data_db)
@@ -1092,8 +1437,8 @@ elif is_data_exists():
                     st.write(f"• {bansos}: {count}")
     
     # Admin Tools (jika ada)
-    if st.session_state.is_admin and len(tabs) > 8:
-        with tabs[8]:  # Admin Tools
+    if st.session_state.is_admin and len(tabs) > 9:
+        with tabs[9]:  # Admin Tools
             st.subheader("🔧 Admin Tools")
             
             tab_admin1, tab_admin2, tab_admin3 = st.tabs(["User Management", "Login Logs", "Data Audit"])
@@ -1206,5 +1551,5 @@ with st.sidebar.expander("⚠️ Tips Keamanan"):
     4. **Hanya admin** yang bisa menambah user baru
     5. **Validasi data** sebelum menyimpan
     6. **Backup database** secara teratur
-    """) 
-    
+    7. **Validasi file** sebelum upload data massal
+    """)
