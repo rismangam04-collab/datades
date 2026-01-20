@@ -57,17 +57,20 @@ def validate_input(text: str, max_length: int = 100) -> bool:
     return len(text) <= max_length
 
 # ================= FUNGSI DATABASE =================
+REPO_DB = "penduduk.db"                 # dari GitHub (data awal)
+PERSIST_DB = "/home/appuser/penduduk.db"  # database kerja permanen
+
 def get_connection():
-    base_dir = "/home/appuser"   # FOLDER PERSISTENT STREAMLIT
-    os.makedirs(base_dir, exist_ok=True)
+    # Kalau database persistent belum ada, salin dari repo
+    if not os.path.exists(PERSIST_DB):
+        if os.path.exists(REPO_DB):
+            import shutil
+            shutil.copy(REPO_DB, PERSIST_DB)
+        else:
+            # kalau tidak ada sama sekali, buat baru
+            open(PERSIST_DB, "a").close()
 
-    db_path = os.path.join(base_dir, "penduduk.db")
-
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA secure_delete = ON")
-
+    conn = sqlite3.connect(PERSIST_DB, check_same_thread=False)
     return conn
 
 
