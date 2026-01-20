@@ -58,7 +58,7 @@ def validate_input(text: str, max_length: int = 100) -> bool:
 
 # ================= FUNGSI DATABASE =================
 def get_connection():
-    base_dir = ".data"
+    base_dir = "/home/appuser"   # FOLDER PERSISTENT STREAMLIT
     os.makedirs(base_dir, exist_ok=True)
 
     db_path = os.path.join(base_dir, "penduduk.db")
